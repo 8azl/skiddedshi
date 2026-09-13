@@ -1,4 +1,4 @@
-if not LPH_OBFUSCATED then
+ if not LPH_OBFUSCATED then
 	LPH_ENCFUNC = function(callback)
 		return callback
 	end
@@ -922,7 +922,7 @@ function library._init(self: _runtime)
 	end
 
 	user_input_service.InputBegan:Connect(function(input, processed)
-		if processed then
+		if user_input_service:GetFocusedTextBox() ~= nil then
 			return
 		end
 
@@ -1618,7 +1618,7 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 
 							runtime:update_keybind_list()
 						end
-					elseif not processed and key and input.KeyCode == key then
+					elseif user_input_service:GetFocusedTextBox() == nil and key and input.KeyCode == key then
 						set_toggle(not state, true)
 					end
 				end)
@@ -2610,9 +2610,25 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 						runtime._flags[flag] = key.Name
 						runtime:_save()
 					end
-				elseif not processed and input.KeyCode == key then
-					if _values.callback then
-						_values.callback()
+				else
+					local is_typing = user_input_service:GetFocusedTextBox() ~= nil
+					if not is_typing and input.KeyCode == key then
+						if _values.callback then
+							_values.callback(true)
+						end
+					end
+				end
+			end)
+
+			user_input_service.InputEnded:Connect(function(input, processed)
+				if not picking then
+					local is_typing = user_input_service:GetFocusedTextBox() ~= nil
+					if not is_typing and input.KeyCode == key then
+						if _values.on_release then
+							_values.on_release()
+						elseif _values.callback_release then
+							_values.callback_release()
+						end
 					end
 				end
 			end)
@@ -2630,7 +2646,11 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 							runtime._flags[flag] = key.Name
 						end
 					end,
+					get = function()
+						return key
+					end,
 					callback = _values.callback,
+					on_release = _values.on_release or _values.callback_release,
 				}
 			end
 		end
