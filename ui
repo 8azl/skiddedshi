@@ -134,7 +134,7 @@ type _runtime = typeof(setmetatable({} :: runtime_default, library))
 type runtime_typeof = _runtime | typeof(library)
 
 local interface_parent = (gethui and gethui()) or core_gui
-local old_interface = interface_parent:FindFirstChild('_Visual')
+local old_interface = interface_parent:FindFirstChild('_visual') or interface_parent:FindFirstChild('_angeli')
 
 if old_interface then
 	debris:AddItem(old_interface, 0)
@@ -321,38 +321,160 @@ if not isfolder('Visual/luas') then
 	makefolder('Visual/luas')
 end
 
-function library._save(self: runtime_typeof)
-	if not isfile(`Visual/configs/{game.GameId}.json`) then
-		writefile(`Visual/configs/{game.GameId}.json`, http_service:JSONEncode({}))
+local function serialize_value(val)
+	local t = typeof(val)
+	if t == 'boolean' or t == 'number' or t == 'string' then
+		return val
+	elseif t == 'Color3' then
+		return { __type = 'Color3', r = val.R, g = val.G, b = val.B }
+	elseif t == 'EnumItem' then
+		return { __type = 'EnumItem', name = val.Name }
+	elseif t == 'table' then
+		local copy = {}
+		for k, v in _pairs(val) do
+			if _type(k) == 'string' or _type(k) == 'number' then
+				copy[k] = serialize_value(v)
+			end
+		end
+		return copy
 	end
+	return nil
+end
 
+local function deserialize_value(val)
+	if _type(val) == 'table' then
+		if val.__type == 'Color3' and val.r and val.g and val.b then
+			return Color3.new(val.r, val.g, val.b)
+		elseif val.__type == 'EnumItem' and val.name then
+			local ok, enum_val = _pcall(function()
+				return Enum.KeyCode[val.name]
+			end)
+			if ok and enum_val then return enum_val end
+			return val.name
+		end
+		local copy = {}
+		for k, v in _pairs(val) do
+			copy[k] = deserialize_value(v)
+		end
+		return copy
+	end
+	return val
+end
+
+function library._save(self: runtime_typeof, custom_name: string?)
+	local name = custom_name or (game.GameId and game.GameId ~= 0 and _tostring(game.GameId)) or 'default'
+	local save_data = {}
 	for index, value in _pairs(self._flags) do
-		self._config[index] = _type(value) == 'table' and http_service:JSONDecode(http_service:JSONEncode(value))
-			or value
+		local serialized = serialize_value(value)
+		if serialized ~= nil then
+			save_data[index] = serialized
+			self._config[index] = serialized
+		end
 	end
-
 	_pcall(function()
-		writefile(`Visual/configs/{game.GameId}.json`, http_service:JSONEncode(self._config))
+		if not isfolder('Visual') then makefolder('Visual') end
+		if not isfolder('Visual/configs') then makefolder('Visual/configs') end
+		writefile(`Visual/configs/{name}.json`, http_service:JSONEncode(save_data))
 	end)
 end
 
-function library.load(self: runtime_typeof)
-	if not isfile(`Visual/configs/{game.GameId}.json`) then
-		self:_save()
+function library.save_config(self: runtime_typeof, name: string)
+	if not name or name == '' then name = 'default' end
+	name = name:gsub('[^%w%-_]', '')
+	self:_save(name)
+end
+
+function library.load(self: runtime_typeof, custom_name: string?)
+	local name = custom_name or (game.GameId and game.GameId ~= 0 and _tostring(game.GameId)) or 'default'
+	local path = `Visual/configs/{name}.json`
+	if not isfile(path) then
+		path = `Angeli/configs/{name}.json`
+	end
+	if not isfile(path) then
+		return self._flags
 	end
 
 	local success, result = _pcall(function()
-		return http_service:JSONDecode(readfile(`Visual/configs/{game.GameId}.json`))
+		return http_service:JSONDecode(readfile(path))
 	end)
 
-	if success and result then
+	if success and _type(result) == 'table' then
 		for index, value in _pairs(result) do
-			self._flags[index] = value
-			self._config[index] = value
+			local deserialized = deserialize_value(value)
+			self._flags[index] = deserialized
+			self._config[index] = deserialized
+		end
+
+		if self._registered_elements then
+			for flag, elem in _pairs(self._registered_elements) do
+				if self._flags[flag] ~= nil and elem.set then
+					_pcall(elem.set, self._flags[flag])
+				end
+			end
 		end
 	end
 
 	return self._flags
+end
+
+function library.load_config(self: runtime_typeof, name: string)
+	if not name or name == '' then name = 'default' end
+	name = name:gsub('[^%w%-_]', '')
+	return self:load(name)
+end
+
+function library.get_configs(self: runtime_typeof)
+	local configs = {}
+	local seen = {}
+	_pcall(function()
+		if not isfolder('Visual/configs') then
+			if not isfolder('Visual') then makefolder('Visual') end
+			makefolder('Visual/configs')
+		end
+		if listfiles then
+			if isfolder('Visual/configs') then
+				for _, file_path in _ipairs(listfiles('Visual/configs')) do
+					local file_name = file_path:match('([^/\\]+)%.json$')
+					if file_name and not seen[file_name] then
+						seen[file_name] = true
+						_insert(configs, file_name)
+					end
+				end
+			end
+			if isfolder('Angeli/configs') then
+				for _, file_path in _ipairs(listfiles('Angeli/configs')) do
+					local file_name = file_path:match('([^/\\]+)%.json$')
+					if file_name and not seen[file_name] then
+						seen[file_name] = true
+						_insert(configs, file_name)
+					end
+				end
+			end
+		end
+	end)
+	if #configs == 0 then
+		configs = {'default'}
+	end
+	return configs
+end
+
+function library.delete_config(self: runtime_typeof, name: string)
+	if not name or name == '' then return false end
+	name = name:gsub('[^%w%-_]', '')
+	local deleted = false
+	_pcall(function()
+		local path = `Visual/configs/{name}.json`
+		if isfile(path) and delfile then
+			delfile(path)
+			deleted = true
+		end
+		local old_path = `Angeli/configs/{name}.json`
+		if isfile(old_path) and delfile then
+			delfile(old_path)
+			deleted = true
+		end
+	end)
+	return deleted
 end
 
 library:load()
@@ -381,6 +503,7 @@ library._new = function(runtime_type: string?): _runtime
 		_type = runtime_type,
 		_config = library._config,
 		_flags = library._flags,
+		_registered_elements = {},
 		_active_dropdowns = {},
 		_keybind_entries = {},
 		_keybind_list_visible = false,
@@ -427,7 +550,7 @@ function library._init(self: _runtime)
 	set_thread_identity(6)
 
 	local _main = create_new('ScreenGui', {
-		Name = '_Visual',
+		Name = '_visual',
 		ResetOnSpawn = false,
 		IgnoreGuiInset = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -543,7 +666,7 @@ function library._init(self: _runtime)
 	end)
 
 	local _toggle_gui = create_new('ScreenGui', {
-		Name = '_Visual_toggle',
+		Name = '_visual_toggle',
 		ResetOnSpawn = false,
 		IgnoreGuiInset = true,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -594,7 +717,7 @@ function library._init(self: _runtime)
 	create_label({
 		Position = _new_udim2(0, (10 + 10), 0, 0),
 		Size = _new_udim2(1, -((10 + 10) + 10), 1, 0),
-		Text = 'viusals.cc',
+		Text = 'Visual',
 		TextColor3 = Color3.fromRGB(255, 255, 255),
 		TextSize = self._is_mobile and 18 or 17,
 		TextXAlignment = Enum.TextXAlignment.Left,
@@ -664,20 +787,20 @@ function library._init(self: _runtime)
 
 	if get_custom_asset and self._type == '_limited' then
 		_pcall(function()
-			local cached = isfile('Visual/assets/succubus.png') and readfile('Visual/assets/succubus.png') or nil
+			local cached = isfile('Angeli/assets/succubus.png') and readfile('Angeli/assets/succubus.png') or nil
 
 			if not cached or cached:sub(2, 4) ~= 'PNG' then
 				local content =
-					game:HttpGet('https://raw.githubusercontent.com/retilin/Visual/refs/heads/main/assets/succubus.png')
+					game:HttpGet('https://raw.githubusercontent.com/retilin/Angeli/refs/heads/main/assets/succubus.png')
 
 				if content and content:sub(2, 4) == 'PNG' then
-					writefile('Visual/assets/succubus.png', content)
+					writefile('Angeli/assets/succubus.png', content)
 				end
 			end
 		end)
 
 		local logo_loaded, logo_asset = _pcall(function()
-			return get_custom_asset('Visual/assets/succubus.png')
+			return get_custom_asset('Angeli/assets/succubus.png')
 		end)
 
 		if logo_loaded and logo_asset and logo_asset ~= '' then
@@ -1503,9 +1626,27 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 
 			if runtime._flags[flag] ~= nil then
 				state = runtime._flags[flag]
+			else
+				runtime._flags[flag] = state
 			end
 
 			apply_toggle(false)
+
+			if _values.callback then
+				task.spawn(function()
+					_pcall(_values.callback, state)
+				end)
+			end
+
+			if runtime._registered_elements and flag then
+				runtime._registered_elements[flag] = {
+					type = 'toggle',
+					set = function(val)
+						set_toggle(val == true, true)
+					end,
+					callback = _values.callback,
+				}
+			end
 
 			if _values.is_keybind and not runtime._is_mobile then
 				local bind_flag = `{flag}_key`
@@ -1533,6 +1674,15 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 			click_button.MouseButton1Click:Connect(function()
 				set_toggle(not state, true)
 			end)
+
+			return {
+				set = function(self, val)
+					set_toggle(val == true, true)
+				end,
+				get = function(self)
+					return state
+				end,
+			}
 		end
 
 		function group_manager:create_slider(flag, _values)
@@ -1541,13 +1691,21 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 				flag = _values.flag
 			end
 
-			local default = _values.default
+			local default = _values.default or _values.minimum or 0
 
 			if runtime._flags[flag] ~= nil then
 				default = runtime._flags[flag]
+			else
+				runtime._flags[flag] = default
 			end
 
 			local value = default
+
+			if _values.callback then
+				task.spawn(function()
+					_pcall(_values.callback, value)
+				end)
+			end
 
 			local slider_frame = create_new('Frame', {
 				BackgroundTransparency = 1,
@@ -1679,6 +1837,36 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 					update_slider(input)
 				end
 			end)
+
+			local set_slider_val = function(new_val)
+				local min_val = _values.minimum or 0
+				local max_val = _values.maximum or 100
+				local position = _clamp((new_val - min_val) / (max_val - min_val), 0, 1)
+				value = round_number(new_val, _values.rounding and 1 or 0)
+				value_label.Text = _tostring(value)
+				track_fill.Size = _new_udim2(position, 0, 1, 0)
+				runtime._flags[flag] = value
+				if _values.callback then
+					_pcall(_values.callback, value)
+				end
+			end
+
+			if runtime._registered_elements and flag then
+				runtime._registered_elements[flag] = {
+					type = 'slider',
+					set = set_slider_val,
+					callback = _values.callback,
+				}
+			end
+
+			return {
+				set = function(self, new_val)
+					set_slider_val(new_val)
+				end,
+				get = function(self)
+					return value
+				end,
+			}
 		end
 
 		function group_manager:create_button(flag, _values)
@@ -1726,6 +1914,11 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 
 			local box_height = _max(24, tonumber(_values.height) or 56)
 			local raw_value = _tostring(_values.default or '')
+			if flag and runtime._flags[flag] ~= nil then
+				raw_value = _tostring(runtime._flags[flag])
+			elseif flag then
+				runtime._flags[flag] = raw_value
+			end
 			local textbox_frame = create_new('Frame', {
 				BackgroundTransparency = 1,
 				LayoutOrder = next_row_order(),
@@ -1843,6 +2036,16 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 				return textbox_frame.Visible
 			end
 
+			if runtime._registered_elements and flag then
+				runtime._registered_elements[flag] = {
+					type = 'textbox',
+					set = function(val)
+						textbox_manager:set_value(val)
+					end,
+					callback = _values.callback,
+				}
+			end
+
 			return textbox_manager
 		end
 
@@ -1871,6 +2074,14 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 
 			if flag and runtime._flags[flag] ~= nil then
 				default = runtime._flags[flag]
+			elseif flag then
+				runtime._flags[flag] = default
+			end
+
+			if _values.callback then
+				task.spawn(function()
+					_pcall(_values.callback, default)
+				end)
 			end
 
 			if is_multi and _type(default) == 'table' then
@@ -2298,6 +2509,16 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 			update_selected_text()
 			update_option_labels()
 
+			if runtime._registered_elements and flag then
+				runtime._registered_elements[flag] = {
+					type = 'dropdown',
+					set = function(val)
+						dropdown_manager:set_value(val)
+					end,
+					callback = _values.callback,
+				}
+			end
+
 			_insert(runtime._active_dropdowns, dropdown_manager)
 
 			return dropdown_manager
@@ -2322,6 +2543,9 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 			end
 
 			local key = default
+			if flag and runtime._flags[flag] == nil then
+				runtime._flags[flag] = key.Name
+			end
 			local picking = false
 
 			local keybind_frame = create_new('Frame', {
@@ -2392,6 +2616,23 @@ function library.create_tab(self: _runtime, title: string, icon: string?, layout
 					end
 				end
 			end)
+
+			if runtime._registered_elements and flag then
+				runtime._registered_elements[flag] = {
+					type = 'keybind',
+					set = function(val)
+						local ok, new_key = _pcall(function()
+							return typeof(val) == 'EnumItem' and val or Enum.KeyCode[val]
+						end)
+						if ok and new_key then
+							key = new_key
+							bind_button.Text = key.Name
+							runtime._flags[flag] = key.Name
+						end
+					end,
+					callback = _values.callback,
+				}
+			end
 		end
 
 		_insert(tab_manager._groups, group_manager)
@@ -2774,7 +3015,7 @@ local lua_file_name = LPH_JIT(function(name)
 end)
 
 local lua_source_path = LPH_NO_VIRTUALIZE(function(file_name)
-	return `Visual/luas/{file_name}`
+	return `Angeli/luas/{file_name}`
 end)
 
 local valid_lua_file_name = LPH_NO_VIRTUALIZE(function(file_name)
@@ -2782,7 +3023,7 @@ local valid_lua_file_name = LPH_NO_VIRTUALIZE(function(file_name)
 end)
 
 local lua_store_path = LPH_NO_VIRTUALIZE(function()
-	return `Visual/luas/{game.GameId}.json`
+	return `Angeli/luas/{game.GameId}.json`
 end)
 
 local read_lua_store = LPH_JIT(function()
@@ -2891,7 +3132,7 @@ local read_lua_store = LPH_JIT(function()
 	local discovered_paths = {}
 
 	if _type(listfiles) == 'function' then
-		local list_success, paths = _pcall(listfiles, 'Visual/luas')
+		local list_success, paths = _pcall(listfiles, 'Angeli/luas')
 
 		if list_success and _type(paths) == 'table' then
 			for _, path in paths do
@@ -3366,7 +3607,7 @@ local build_lua_environment = LPH_ENCFUNC(function(queued)
 	local internals = read_only(lua_internal_exports)
 	local custom_require = LPH_NO_UPVALUES(function(module_name)
 		if _type(module_name) ~= 'string' then
-			error('Visual Lua require expects a string path', 2)
+			error('Angeli Lua require expects a string path', 2)
 		end
 
 		local path = string.gsub(normalize_name(module_name), '\\', '/')
@@ -3507,7 +3748,7 @@ library._load_lua_entry = LPH_ENCFUNC(function(self: _runtime, manager, entry)
 		return false, 'the executor must support loadstring and setfenv'
 	end
 
-	local chunk, compile_error = compile_lua_source(entry.source, `@Visual/{entry.name}`)
+	local chunk, compile_error = compile_lua_source(entry.source, `@Angeli/{entry.name}`)
 
 	if not chunk then
 		return false, _tostring(compile_error)
@@ -3671,7 +3912,7 @@ function library.load_manager(self: runtime_typeof)
 		_loaded = {},
 		_auto_load_files = {},
 		_selected = nil,
-		_auto_load = self._flags.__Visual_lua_auto_load == true,
+		_auto_load = self._flags.__angeli_lua_auto_load == true,
 	}
 
 	for _, entry in store.entries do
@@ -3717,7 +3958,7 @@ function library.load_manager(self: runtime_typeof)
 		return entry and entry.file or nil
 	end
 
-	local selector = lua_group:create_dropdown('__Visual_lua_selected', {
+	local selector = lua_group:create_dropdown('__angeli_lua_selected', {
 		title = 'Luas',
 		options = lua_files(),
 		default = selected_lua_file(),
@@ -3822,7 +4063,7 @@ function library.load_manager(self: runtime_typeof)
 			return false
 		end
 
-		local chunk, compile_error = compile_lua_source(source, '@Visual/import')
+		local chunk, compile_error = compile_lua_source(source, '@Angeli/import')
 
 		if not chunk then
 			lua_warning(`import failed: {_tostring(compile_error)}`)
@@ -3888,7 +4129,7 @@ function library.load_manager(self: runtime_typeof)
 		callback = load_selected,
 	})
 
-	lua_group:create_toggle('__Visual_lua_auto_load', {
+	lua_group:create_toggle('__angeli_lua_auto_load', {
 		title = 'Auto Load',
 		default = false,
 		callback = function(state)
